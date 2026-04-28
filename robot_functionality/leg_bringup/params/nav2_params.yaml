@@ -144,7 +144,7 @@ controller_server:
     general_goal_checker:
       stateful: False
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.15
+      xy_goal_tolerance: 0.22
       yaw_goal_tolerance: 3.14
     FollowPath:           
       #plugin: "dwb_core::DWBLocalPlanner"
@@ -242,8 +242,8 @@ local_costmap:
         # around obstacles within the robot’s fully inscribed radius - even if a 
         # robot is non-circular for optimized first-order collision checking.
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.2
+        cost_scaling_factor: 3.2
+        inflation_radius: 0.16
       local_obstacle_layer:
         plugin: "costmap_intensity::ObstacleLayerIntensity"
         enabled: True
@@ -286,8 +286,8 @@ global_costmap:
         map_subscribe_transient_local: True
       global_inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 5.0
-        inflation_radius: 0.2
+        cost_scaling_factor: 4.2
+        inflation_radius: 0.16
       always_send_full_costmap: True
       # global_obstacle_layer:
       #   plugin: "costmap_intensity::ObstacleLayerIntensity"
