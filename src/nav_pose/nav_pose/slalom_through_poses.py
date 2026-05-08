@@ -27,6 +27,18 @@ def yaw_to_quaternion_msg(yaw: float):
     qw = math.cos(yaw * 0.5)
     return qz, qw
 
+def duration_to_seconds(duration) -> float:
+    if duration is None:
+        return 0.0
+
+    if hasattr(duration, 'nanoseconds'):
+        return duration.nanoseconds / 1e9
+
+    sec = getattr(duration, 'sec', 0)
+    nanosec = getattr(duration, 'nanosec', 0)
+
+    return float(sec) + float(nanosec) / 1e9
+
 
 def parse_point_list(text: str) -> List[Point2D]:
     points: List[Point2D] = []
@@ -48,15 +60,27 @@ def parse_single_point(text: str) -> Point2D:
     return Point2D(float(xy[0]), float(xy[1]))
 
 
-def create_pose(frame_id: str, x: float, y: float, yaw: float) -> PoseStamped:
+def create_pose(frame_id: str, x: float, y: float, yaw: float, node=None) -> PoseStamped:
     pose = PoseStamped()
-    pose.header.frame_id = frame_id
-    pose.pose.position.x = x
-    pose.pose.position.y = y
+
+    if frame_id is None or str(frame_id).strip() == "":
+        frame_id = "map"
+
+    pose.header.frame_id = str(frame_id)
+
+    if node is not None:
+        pose.header.stamp = node.get_clock().now().to_msg()
+
+    pose.pose.position.x = float(x)
+    pose.pose.position.y = float(y)
     pose.pose.position.z = 0.0
+
     qz, qw = yaw_to_quaternion_msg(yaw)
+    pose.pose.orientation.x = 0.0
+    pose.pose.orientation.y = 0.0
     pose.pose.orientation.z = qz
     pose.pose.orientation.w = qw
+
     return pose
 
 
@@ -104,7 +128,7 @@ def compute_slalom_points(
     return generated
 
 
-def points_to_poses(frame_id: str, points: List[Point2D]) -> List[PoseStamped]:
+def points_to_poses(frame_id: str, points: List[Point2D], node=None) -> List[PoseStamped]:
     poses: List[PoseStamped] = []
     if len(points) < 2:
         return poses
@@ -117,7 +141,8 @@ def points_to_poses(frame_id: str, points: List[Point2D]) -> List[PoseStamped]:
         else:
             pre = points[i - 1]
             yaw = math.atan2(cur.y - pre.y, cur.x - pre.x)
-        poses.append(create_pose(frame_id, cur.x, cur.y, yaw))
+
+        poses.append(create_pose(frame_id, cur.x, cur.y, yaw, node=node))
 
     return poses
 
@@ -163,10 +188,16 @@ def main(args=None):
         blend_distance=blend_distance,
         start_from_right=start_from_right,
     )
-    poses = points_to_poses(frame_id, nav_points)
+    if frame_id is None or str(frame_id).strip() == "":
+        frame_id = "map"
+
+    poses = points_to_poses(frame_id, nav_points, node=navigator)
 
     navigator.get_logger().info('等待 Nav2 active...')
-    navigator.waitUntilNav2Active()
+    navigator.waitUntilNav2Active(
+    navigator='bt_navigator',
+    localizer='map_server'
+)
 
     first_side = 'right' if start_from_right else 'left'
     navigator.get_logger().info(
@@ -177,7 +208,11 @@ def main(args=None):
         navigator.get_logger().info(
             f'P{idx:02d}: ({pose.pose.position.x:.3f}, {pose.pose.position.y:.3f})'
         )
-
+    for idx, pose in enumerate(poses):
+        navigator.get_logger().info(
+            f'P{idx:02d}: frame_id="{pose.header.frame_id}", '
+            f'({pose.pose.position.x:.3f}, {pose.pose.position.y:.3f})'
+        )
     navigator.goThroughPoses(poses)
 
     last_feedback_log_time = navigator.get_clock().now()
@@ -189,7 +224,7 @@ def main(args=None):
         if (now - last_feedback_log_time).nanoseconds / 1e9 >= feedback_log_period_sec:
             eta = 0.0
             if hasattr(feedback, 'estimated_time_remaining'):
-                eta = feedback.estimated_time_remaining.nanoseconds / 1e9
+                eta = duration_to_seconds(feedback.estimated_time_remaining)
             navigator.get_logger().info(f'任务执行中，预计剩余: {eta:.1f}s')
             last_feedback_log_time = now
 

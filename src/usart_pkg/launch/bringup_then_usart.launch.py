@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -11,7 +11,6 @@ import os
 
 def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
-    usart_delay_sec = LaunchConfiguration('usart_delay_sec')
 
     declare_use_sim_time = DeclareLaunchArgument(
         'use_sim_time',
@@ -19,11 +18,6 @@ def generate_launch_description():
         description='Whether to use simulation time'
     )
 
-    declare_usart_delay_sec = DeclareLaunchArgument(
-        'usart_delay_sec',
-        default_value='25.0',
-        description='Delay seconds before starting usart_node after bringup_in_real is launched'
-    )
 
     leg_bringup_share = get_package_share_directory('leg_bringup')
     bringup_in_real_launch = os.path.join(
@@ -39,6 +33,13 @@ def generate_launch_description():
         }.items(),
     )
 
+    start_slalom = Node(
+        package='nav_pose',
+        executable='slalom_through_poses',
+        name='slalom_through_poses',
+        output='screen',
+    )
+
     start_usart_node = Node(
         package='usart_pkg',
         executable='usart_node',
@@ -46,14 +47,9 @@ def generate_launch_description():
         output='screen',
     )
 
-    delayed_start_usart = TimerAction(
-        period=usart_delay_sec,
-        actions=[start_usart_node],
-    )
-
     return LaunchDescription([
         declare_use_sim_time,
-        declare_usart_delay_sec,
+        start_slalom,
+        start_usart_node,
         start_bringup,
-        delayed_start_usart,
     ])
