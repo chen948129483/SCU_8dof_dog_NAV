@@ -72,7 +72,7 @@ private:
   std::shared_ptr<tf2_ros::Buffer> tf_;
   std::string plugin_name_;
   rclcpp::Logger logger_ {rclcpp::get_logger("DogDiscreteController")};
-
+  uint8_t last_motion_action_{1};  // 记录上一次真正执行的动作，默认站立
   // --- 订阅者与发布者 ---
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr status_sub_;
   // 注意：Nav2 推荐使用 LifecyclePublisher，方便统一管理状态

@@ -235,18 +235,63 @@ geometry_msgs::msg::TwistStamped DogDiscreteController::computeVelocityCommands(
   step_cmd.speed_level = 0; // 默认所有动作速度等级均为 0
 
   // 4.3 拿着算好的意图和步长参数，去查 70x45cm 的真实轮廓会不会撞墙
-  if (collision_checker_->isCollisionFree(pose, intended_action, physical_step, turn_angle)) {
-    
-    // 将刚才算好的意图装填进发送包
-    step_cmd.action_id = intended_action; 
+// 4.3 拿着算好的意图和步长参数，去查 70x45cm 的真实轮廓会不会撞墙
+auto getReverseAction = [](uint8_t action) -> uint8_t {
+  switch (action) {
+    case 2: return 9; // 上一步前进，这次后退
+    case 9: return 2; // 上一步后退，这次前进
+    case 4: return 5; // 上一步左转，这次右转
+    case 5: return 4; // 上一步右转，这次左转
+    default: return 1; // 站立或未知动作，保底站立
+  }
+};
+
+if (collision_checker_->isCollisionFree(pose, intended_action, physical_step, turn_angle)) {
+  // 正常执行原本规划出来的动作
+  step_cmd.action_id = intended_action;
+  step_cmd.speed_level = intended_speed;
+
+  // 只记录真正的运动动作，不记录站立
+  if (intended_action != 1) {
+    last_motion_action_ = intended_action;
+  }
+
+} else {
+  // 发生碰撞预警，不直接站立，而是尝试反向补偿动作
+  uint8_t recovery_action = getReverseAction(last_motion_action_);
+
+  RCLCPP_WARN(
+    logger_,
+    "防撞触发！原动作 %u 被拦截，尝试根据上一步动作 %u 执行反向恢复动作 %u",
+    intended_action,
+    last_motion_action_,
+    recovery_action);
+
+  if (recovery_action != 1 &&
+      collision_checker_->isCollisionFree(pose, recovery_action, physical_step, turn_angle)) {
+
+    step_cmd.action_id = recovery_action;
     step_cmd.speed_level = intended_speed;
-  
+
+    // 反向动作也算一次真实运动，更新上一步动作
+    last_motion_action_ = recovery_action;
+
+    RCLCPP_WARN(
+      logger_,
+      "反向恢复动作通过防撞检测，执行 action_id=%u",
+      recovery_action);
+
   } else {
-    //  发生碰撞预警，强行篡改指令为原地待命
-    RCLCPP_WARN(logger_, "防撞触发！试图执行动作 %d 被拦截，强行切换至待命状态！", intended_action);
-    step_cmd.action_id = 1; // 1 为站立 (standup)
+    // 如果反向动作也不安全，再做最终保底
+    RCLCPP_WARN(
+      logger_,
+      "反向恢复动作 %u 也存在碰撞风险，最终切换至站立保护。",
+      recovery_action);
+
+    step_cmd.action_id = 1; // standup / 站立
     step_cmd.speed_level = 0;
   }
+}
   // 5. 下发指令
   auto node = node_.lock();
   if (node) {
