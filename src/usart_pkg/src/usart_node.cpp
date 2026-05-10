@@ -7,7 +7,7 @@ UsartNode::UsartNode()
 : Node("usart_node")
 {
   // 声明并获取参数
-  this->declare_parameter("port", "/dev/ttyUSB0");      // USB串口默认路径
+  this->declare_parameter("port", "/dev/ttyACM0");      // USB串口默认路径
 
   std::string port_name = this->get_parameter("port").as_string();
 
