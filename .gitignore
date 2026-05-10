@@ -6,3 +6,6 @@ robot_functionality/leg_bringup/maps/test.pcd
 robot_functionality/leg_bringup/maps/pre/test.pcd
 image/test.pcd
 dependencies_and_tools/FAST_LIVO2_relocation_revise/src/FAST-LIVO2/Log/PCD/all_raw_points.pcd
+dependencies_and_tools/FAST_LIVO2_relocation_revise/src/FAST-LIVO2/Log/imu.txt
+dependencies_and_tools/FAST_LIVO2_relocation_revise/src/FAST-LIVO2/Log/mat_out.txt
+dependencies_and_tools/FAST_LIVO2_relocation_revise/src/FAST-LIVO2/Log/mat_pre.txt
