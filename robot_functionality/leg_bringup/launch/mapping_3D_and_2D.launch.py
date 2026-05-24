@@ -27,6 +27,12 @@ def generate_launch_description():
         description='Start octomap_server to project /cloud_registered into /projected_map.'
     )
     start_octomap_config = LaunchConfiguration('start_octomap')
+    lidar_min_range_arg = DeclareLaunchArgument(
+        'lidar_min_range',
+        default_value='1.0',
+        description='Ignore point cloud points closer than this distance to the current lidar/body pose.'
+    )
+    lidar_min_range_config = LaunchConfiguration('lidar_min_range')
     
     # ========== 环境设置 ==========
     stdout_linebuf_envvar = SetEnvironmentVariable(
@@ -84,6 +90,21 @@ def generate_launch_description():
     )
     
     # ========== 4. OctoMap (3D→2D 地图转换) ==========
+    start_cloud_min_range_filter = Node(
+        package="leg_bringup",
+        executable="pointcloud_min_range_filter",
+        name="cloud_registered_min_range_filter",
+        condition=IfCondition(start_octomap_config),
+        parameters=[{
+            "input_topic": "/cloud_registered",
+            "output_topic": "/cloud_registered_min_range_filtered",
+            "odom_topic": "/aft_mapped_to_init",
+            "min_range": lidar_min_range_config,
+            "use_odom_origin": True,
+        }],
+        output="screen",
+    )
+
     try:
         get_package_share_directory('octomap_server')
         start_octomap = Node(
@@ -96,14 +117,14 @@ def generate_launch_description():
                 "resolution": 0.05,
 
                 # 点云接收范围。建图时雷达离地约 0.15m，略放宽到 -0.2m。
-                "pointcloud_min_z": -0.2,
-                "pointcloud_max_z": 1.8,
-                "filter_ground": False,               # 关键：关闭地面滤波（防止误判）
+                "pointcloud_min_z": -0.1,#只允许略低于机器人高度的数据，以雷达坐标系为准
+                "pointcloud_max_z": 1.0,#限制最大高度点云，避免天花板被识别为障碍
+                "filter_ground": True,               # 开启地面滤波，过滤地面点云
 
                 # 传感器模型
-                "sensor_model/max_range": 10.0,
-                "sensor_model/hit": 0.8,              # 提高命中概率（让台阶更容易被标记）
-                "sensor_model/miss": 0.35,            # 降低未命中概率
+                "sensor_model/max_range": 10.0,#最大建图距离；10m内近场过滤由前置点云滤波节点完成
+                "sensor_model/hit": 0.7,              # 命中率，该值越低噪声越少
+                "sensor_model/miss": 0.4,            # 降低未命中概率
                 "sensor_model/min": 0.12,
                 "sensor_model/max": 0.97,
 
@@ -113,19 +134,19 @@ def generate_launch_description():
                 "publish_free_space": True,
                 "occupancy_map_pub_period": 1.0,
 
-                # 关键：投影范围（包含低矮障碍）
-                "occupancy_min_z": -0.2,
-                "occupancy_max_z": 1.8,
+                # 投影范围（包含低矮障碍）
+                "occupancy_min_z": 0.1,
+                "occupancy_max_z": 0.8,
 
-                #  额外：体素滤波设置（可选）
-                "pointcloud_filter_radius": 0.1,      # 点云滤波半径
-                "pointcloud_filter_neighbors": 2,     # 最小邻居数
+                #  体素滤波设置（可选）
+                "pointcloud_filter_radius": 0.15,      # 点云滤波半径
+                "pointcloud_filter_neighbors": 3,     # 最小邻居数
 
-                #  额外：占据阈值（低于此值不显示为障碍）
-                "occupancy_threshold": 0.3,           # 默认0.5，降低让矮障碍更容易显示
+                # 占据阈值（低于此值不显示为障碍）
+                "occupancy_threshold": 0.2,           # 默认0.5，降低让矮障碍更容易显示
             }],
             remappings=[
-                ("cloud_in", "/cloud_registered"),
+                ("cloud_in", "/cloud_registered_min_range_filtered"),
 
             ],
             output="screen",
@@ -173,9 +194,11 @@ def generate_launch_description():
     ld.add_action(stdout_linebuf_envvar)
     ld.add_action(start_livox_arg)
     ld.add_action(start_octomap_arg)
+    ld.add_action(lidar_min_range_arg)
     ld.add_action(start_livox)
     ld.add_action(tf_static)
     ld.add_action(delayed_start_fast_livo)
+    ld.add_action(start_cloud_min_range_filter)
     ld.add_action(delayed_start_octomap)
     ld.add_action(delayed_start_rviz)
     

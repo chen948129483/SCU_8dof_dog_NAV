@@ -29,9 +29,11 @@ void DogDiscreteController::configure(
   // 声明并读取参数 (在 nav2_params.yaml 中配置)
   declare_parameter_if_not_declared(node, plugin_name_ + ".lookahead_dist", rclcpp::ParameterValue(0.15));
   declare_parameter_if_not_declared(node, plugin_name_ + ".yaw_tolerance", rclcpp::ParameterValue(0.08)); // 约 4.5 度
+  declare_parameter_if_not_declared(node, plugin_name_ + ".goal_stop_dist", rclcpp::ParameterValue(0.22));
 
   node->get_parameter(plugin_name_ + ".lookahead_dist", lookahead_dist_);
   node->get_parameter(plugin_name_ + ".yaw_tolerance", yaw_tolerance_);
+  node->get_parameter(plugin_name_ + ".goal_stop_dist", goal_stop_dist_);
 
   // 订阅狗的执行状态 (必须与底层发布的话题名完全一致)
   status_sub_ = node->create_subscription<std_msgs::msg::Bool>(
@@ -75,11 +77,13 @@ void DogDiscreteController::setPlan(const nav_msgs::msg::Path & path)
 void DogDiscreteController::statusCallback(const std_msgs::msg::Bool::SharedPtr msg)
 {
   is_stepping_ = msg->data;
+  status_tick_received_ = true;
   auto node = node_.lock();
   if (node) {
     RCLCPP_INFO_THROTTLE(
       logger_, *node->get_clock(), 1000,
-      "statusCallback: is_stepping=%s", is_stepping_ ? "true" : "false");
+      "statusCallback: is_stepping=%s, command tick received",
+      is_stepping_ ? "true" : "false");
   }
 }
 
@@ -130,19 +134,27 @@ geometry_msgs::msg::TwistStamped DogDiscreteController::computeVelocityCommands(
   zero_cmd_vel.twist.linear.x = 0.0;
   zero_cmd_vel.twist.angular.z = 0.0;
 
-  // 【核心约束1：状态锁】
-  // if (!is_stepping_) {
-  //   // if (node) {
-  //   //   RCLCPP_WARN_THROTTLE(
-  //   //     logger_, *node->get_clock(), 1000,
-  //   //     "Skip publish: is_stepping_=true, waiting for motion complete.");
-  //   // }
-  //   RCLCPP_ERROR(
-  //     logger_,
-  //     "myinfo: is_stepping=%s", is_stepping_ ? "true" : "false");
-    
-  //   return zero_cmd_vel;
-  // }
+  // 核心约束：状态话题作为节拍信号。收到任意 true/false 后，只允许下发一条指令。
+  if (!status_tick_received_) {
+    auto node = node_.lock();
+    if (node) {
+      RCLCPP_WARN_THROTTLE(
+        logger_, *node->get_clock(), 1000,
+        "Skip publish: waiting for /dog_status/is_stepping tick.");
+    }
+    return zero_cmd_vel;
+  }
+
+  // A. 终点检查：离散步态到终点附近就直接站立，不继续追最后一点的朝向。
+  if (global_plan_.poses.empty()) {
+    auto node = node_.lock();
+    if (node) {
+      RCLCPP_WARN_THROTTLE(
+        logger_, *node->get_clock(), 1000,
+        "Skip publish: global_plan_ is empty (setPlan not received or empty path).");
+    }
+    return zero_cmd_vel;
+  }
 
   // 1. 局部路径转换与裁剪逻辑 (保持你原来的代码逻辑)
   nav_msgs::msg::Path local_plan;
@@ -164,6 +176,7 @@ geometry_msgs::msg::TwistStamped DogDiscreteController::computeVelocityCommands(
     stop_cmd.action_id = 1; // standup
     stop_cmd.speed_level = 0;
     cmd_pub_->publish(stop_cmd);
+    status_tick_received_ = false;
     return zero_cmd_vel;
   }
 
@@ -181,6 +194,26 @@ geometry_msgs::msg::TwistStamped DogDiscreteController::computeVelocityCommands(
   }
   local_plan.poses.erase(local_plan.poses.begin(), local_plan.poses.begin() + closest_index);
 
+  const auto & goal_pose_local = local_plan.poses.back();
+  const double goal_dx = goal_pose_local.pose.position.x - pose.pose.position.x;
+  const double goal_dy = goal_pose_local.pose.position.y - pose.pose.position.y;
+  const double goal_distance = std::hypot(goal_dx, goal_dy);
+
+  if (goal_distance <= goal_stop_dist_) {
+    RCLCPP_INFO(
+      logger_,
+      "已进入终点站立半径 %.3f m (当前距离 %.3f m)，切换至站立状态。",
+      goal_stop_dist_,
+      goal_distance);
+    usart_pkg::msg::Action stand_cmd;
+    stand_cmd.action_id = 1; // standup
+    stand_cmd.speed_level = 0;
+    cmd_pub_->publish(stand_cmd);
+    last_motion_action_ = 1;
+    status_tick_received_ = false;
+    return zero_cmd_vel;
+  }
+
   // 2. 获取预瞄点
   geometry_msgs::msg::PoseStamped target_pose = getLookAheadPoint(pose, local_plan);
 
@@ -189,17 +222,6 @@ geometry_msgs::msg::TwistStamped DogDiscreteController::computeVelocityCommands(
   double dy = target_pose.pose.position.y - pose.pose.position.y;
   double distance_error = std::hypot(dx, dy);
 
-  // A. 终点检查
-  if (global_plan_.poses.empty()) {
-    auto node = node_.lock();
-    if (node) {
-      RCLCPP_WARN_THROTTLE(
-        logger_, *node->get_clock(), 1000,
-        "Skip publish: global_plan_ is empty (setPlan not received or empty path).");
-    }
-    return zero_cmd_vel;
-  }
-
   geometry_msgs::msg::Pose goal_pose = global_plan_.poses.back().pose;
   if (goal_checker->isGoalReached(pose.pose, goal_pose, velocity)) {
     RCLCPP_INFO(logger_, "已到达终点，切换至站立状态。");
@@ -207,6 +229,7 @@ geometry_msgs::msg::TwistStamped DogDiscreteController::computeVelocityCommands(
     stand_cmd.action_id = 1; // standup
     stand_cmd.speed_level = 0;
     cmd_pub_->publish(stand_cmd);
+    status_tick_received_ = false;
     return zero_cmd_vel;
   }
 
@@ -300,6 +323,7 @@ if (collision_checker_->isCollisionFree(pose, intended_action, physical_step, tu
       "Publish /dog_step_cmd: action_id=%u speed_level=%u", step_cmd.action_id, step_cmd.speed_level);
   }
   cmd_pub_->publish(step_cmd);
+  status_tick_received_ = false;
 
   return zero_cmd_vel;
 }

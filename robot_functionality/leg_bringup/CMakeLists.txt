@@ -34,11 +34,13 @@ install(DIRECTORY launch maps params behavior_tree rviz
 # so it can be launched via launch_ros.actions.Node.
 install(PROGRAMS
   nodes/static_tf_broadcaster.py
+  nodes/pointcloud_min_range_filter.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
 # Create a no-extension symlink for the executable to satisfy ros2 launch/ros2 run expectations
 install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_INSTALL_PREFIX}/lib/${PROJECT_NAME}/static_tf_broadcaster.py ${CMAKE_INSTALL_PREFIX}/lib/${PROJECT_NAME}/static_tf_broadcaster)")
+install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_INSTALL_PREFIX}/lib/${PROJECT_NAME}/pointcloud_min_range_filter.py ${CMAKE_INSTALL_PREFIX}/lib/${PROJECT_NAME}/pointcloud_min_range_filter)")
 
 
 # 4 include 

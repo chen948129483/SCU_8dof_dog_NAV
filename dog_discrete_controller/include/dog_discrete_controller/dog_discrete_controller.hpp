@@ -80,6 +80,7 @@ private:
 
   // --- 核心状态与数据 ---
   bool is_stepping_ = false;        // 狗是否正在走步子的标志位
+  bool status_tick_received_ = false; // 收到任意状态消息后，允许下发一条离散指令
   nav_msgs::msg::Path global_plan_; // 当前缓存的全局路径
 
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros_;//（新增：指针，用来存储局部代价地图）
@@ -88,6 +89,7 @@ private:
   // --- 算法参数 (将从 yaml 文件中读取) ---
   double lookahead_dist_; // 预瞄距离（单位：米）
   double yaw_tolerance_;  // 角度容忍度（单位：弧度，超过这个值就发原地旋转指令）
+  double goal_stop_dist_; // 进入终点半径后直接站立，避免原地反复转向
     
   // --- 内部辅助函数 ---
   

@@ -10,6 +10,7 @@ from nav_msgs.msg import Path
 from visualization_msgs.msg import Marker, MarkerArray
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
+from tf2_ros import Buffer, TransformException, TransformListener
 
 
 @dataclass
@@ -63,6 +64,105 @@ def parse_single_point(text: str) -> Point2D:
     return Point2D(float(xy[0]), float(xy[1]))
 
 
+def parse_optional_point(text: str):
+    if text is None or str(text).strip() == "":
+        return None
+    return parse_single_point(text)
+
+
+def wait_for_current_point(
+    node,
+    tf_buffer: Buffer,
+    frame_id: str,
+    robot_base_frame: str,
+    timeout_sec: float,
+):
+    deadline = node.get_clock().now().nanoseconds / 1e9 + timeout_sec
+    last_error = None
+
+    while rclpy.ok() and node.get_clock().now().nanoseconds / 1e9 < deadline:
+        try:
+            transform = tf_buffer.lookup_transform(
+                frame_id,
+                robot_base_frame,
+                rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=0.1),
+            )
+            return Point2D(
+                transform.transform.translation.x,
+                transform.transform.translation.y,
+            )
+        except TransformException as ex:
+            last_error = ex
+            rclpy.spin_once(node, timeout_sec=0.05)
+
+    raise RuntimeError(
+        f"无法在 {timeout_sec:.1f}s 内获取 TF {frame_id}->{robot_base_frame}: {last_error}"
+    )
+
+
+def order_poles_nearest_neighbor(poles: List[Point2D], start: Point2D) -> List[Point2D]:
+    remaining = list(poles)
+    ordered: List[Point2D] = []
+    cursor = start
+
+    while remaining:
+        next_pole = min(remaining, key=lambda p: math.hypot(p.x - cursor.x, p.y - cursor.y))
+        ordered.append(next_pole)
+        remaining.remove(next_pole)
+        cursor = next_pole
+
+    return ordered
+
+
+def compute_auto_end_anchor(poles: List[Point2D], start_anchor: Point2D, extension: float) -> Point2D:
+    if len(poles) >= 2:
+        prev_ref = poles[-2]
+        last_ref = poles[-1]
+    else:
+        prev_ref = start_anchor
+        last_ref = poles[-1]
+
+    tx, ty = normalize(last_ref.x - prev_ref.x, last_ref.y - prev_ref.y)
+    return Point2D(last_ref.x + tx * extension, last_ref.y + ty * extension)
+
+
+def make_slalom_plan(
+    frame_id: str,
+    start_anchor: Point2D,
+    poles: List[Point2D],
+    configured_end_anchor,
+    offset: float,
+    blend_distance: float,
+    start_from_right: bool,
+    auto_order_poles: bool,
+    auto_compute_end_anchor: bool,
+    end_extension: float,
+    node,
+):
+    planning_poles = poles
+    if auto_order_poles:
+        planning_poles = order_poles_nearest_neighbor(poles, start_anchor)
+
+    if auto_compute_end_anchor:
+        end_anchor = compute_auto_end_anchor(planning_poles, start_anchor, end_extension)
+    elif configured_end_anchor is not None:
+        end_anchor = configured_end_anchor
+    else:
+        raise ValueError('auto_compute_end_anchor=false 时必须配置 end_anchor')
+
+    nav_points = compute_slalom_points(
+        poles=planning_poles,
+        start_anchor=start_anchor,
+        end_anchor=end_anchor,
+        offset=offset,
+        blend_distance=blend_distance,
+        start_from_right=start_from_right,
+    )
+    poses = points_to_poses(frame_id, nav_points, node=node)
+    return planning_poles, end_anchor, nav_points, poses
+
+
 def create_pose(frame_id: str, x: float, y: float, yaw: float, node=None) -> PoseStamped:
     pose = PoseStamped()
 
@@ -95,7 +195,7 @@ def compute_slalom_points(
     blend_distance: float,
     start_from_right: bool,
 ) -> List[Point2D]:
-    generated: List[Point2D] = []
+    generated: List[Point2D] = [start_anchor]
 
     for i, pole in enumerate(poles):
         prev_ref = start_anchor if i == 0 else poles[i - 1]
@@ -319,6 +419,17 @@ def main(args=None):
     navigator.declare_parameter('pole_points', '0.0,0.4;-0.3,1.7;1.0,1.4;2.0,1.4')
     navigator.declare_parameter('start_anchor', '-0.5,0.2')
     navigator.declare_parameter('end_anchor', '2.4,1.4')
+    navigator.declare_parameter('robot_base_frame', 'base')
+    navigator.declare_parameter('use_current_pose_as_start_anchor', True)
+    navigator.declare_parameter('auto_order_poles', True)
+    navigator.declare_parameter('auto_compute_end_anchor', True)
+    navigator.declare_parameter('end_extension', 0.45)
+    navigator.declare_parameter('current_pose_timeout_sec', 8.0)
+    navigator.declare_parameter('dynamic_replan', True)
+    navigator.declare_parameter('replan_period_sec', 1.0)
+    navigator.declare_parameter('replan_min_start_shift', 0.05)
+    navigator.declare_parameter('update_navigation_on_replan', False)
+    navigator.declare_parameter('nav_goal_update_period_sec', 5.0)
 
     frame_id = navigator.get_parameter('frame_id').value
     offset = float(navigator.get_parameter('offset').value)
@@ -329,42 +440,97 @@ def main(args=None):
     pole_points_str = navigator.get_parameter('pole_points').value
     start_anchor_str = navigator.get_parameter('start_anchor').value
     end_anchor_str = navigator.get_parameter('end_anchor').value
+    robot_base_frame = navigator.get_parameter('robot_base_frame').value
+    use_current_pose_as_start_anchor = bool(
+        navigator.get_parameter('use_current_pose_as_start_anchor').value
+    )
+    auto_order_poles = bool(navigator.get_parameter('auto_order_poles').value)
+    auto_compute_end_anchor = bool(navigator.get_parameter('auto_compute_end_anchor').value)
+    end_extension = float(navigator.get_parameter('end_extension').value)
+    current_pose_timeout_sec = float(navigator.get_parameter('current_pose_timeout_sec').value)
+    dynamic_replan = bool(navigator.get_parameter('dynamic_replan').value)
+    replan_period_sec = float(navigator.get_parameter('replan_period_sec').value)
+    replan_min_start_shift = float(navigator.get_parameter('replan_min_start_shift').value)
+    update_navigation_on_replan = bool(
+        navigator.get_parameter('update_navigation_on_replan').value
+    )
+    nav_goal_update_period_sec = float(navigator.get_parameter('nav_goal_update_period_sec').value)
 
     try:
         poles = parse_point_list(pole_points_str)
-        start_anchor = parse_single_point(start_anchor_str)
-        end_anchor = parse_single_point(end_anchor_str)
+        configured_start_anchor = parse_single_point(start_anchor_str)
+        configured_end_anchor = parse_optional_point(end_anchor_str)
     except ValueError as ex:
         navigator.get_logger().error(f'参数解析失败: {ex}')
         navigator.destroy_node()
         rclpy.shutdown()
         return
 
-    nav_points = compute_slalom_points(
-        poles=poles,
-        start_anchor=start_anchor,
-        end_anchor=end_anchor,
-        offset=offset,
-        blend_distance=blend_distance,
-        start_from_right=start_from_right,
-    )
     if frame_id is None or str(frame_id).strip() == "":
         frame_id = "map"
 
-    poses = points_to_poses(frame_id, nav_points, node=navigator)
+    navigator.get_logger().info('等待 Nav2 active...')
+    navigator.waitUntilNav2Active(
+    navigator='bt_navigator',
+    localizer='map_server'
+    )
+
+    tf_buffer = Buffer()
+    tf_listener = TransformListener(tf_buffer, navigator)
+
+    start_anchor = configured_start_anchor
+    if use_current_pose_as_start_anchor:
+        try:
+            start_anchor = wait_for_current_point(
+                node=navigator,
+                tf_buffer=tf_buffer,
+                frame_id=frame_id,
+                robot_base_frame=robot_base_frame,
+                timeout_sec=current_pose_timeout_sec,
+            )
+            navigator.get_logger().info(
+                f'使用当前机器人位置作为绕杆起点: ({start_anchor.x:.3f}, {start_anchor.y:.3f})'
+            )
+        except RuntimeError as ex:
+            navigator.get_logger().warn(
+                f'{ex}; 回退使用参数 start_anchor=({configured_start_anchor.x:.3f}, {configured_start_anchor.y:.3f})'
+            )
+
+    try:
+        planning_poles, end_anchor, nav_points, poses = make_slalom_plan(
+            frame_id=frame_id,
+            start_anchor=start_anchor,
+            poles=poles,
+            configured_end_anchor=configured_end_anchor,
+            offset=offset,
+            blend_distance=blend_distance,
+            start_from_right=start_from_right,
+            auto_order_poles=auto_order_poles,
+            auto_compute_end_anchor=auto_compute_end_anchor,
+            end_extension=end_extension,
+            node=navigator,
+        )
+    except ValueError as ex:
+        navigator.get_logger().error(str(ex))
+        navigator.destroy_node()
+        rclpy.shutdown()
+        return
+
+    if auto_order_poles:
+        navigator.get_logger().info('已按当前起点到最近杆的顺序自动重排 pole_points')
+    if auto_compute_end_anchor:
+        navigator.get_logger().info(
+            f'自动生成终点锚点: ({end_anchor.x:.3f}, {end_anchor.y:.3f})'
+        )
+
     publish_slalom_visualization(
     node=navigator,
     path_pub=path_pub,
     marker_pub=marker_pub,
     frame_id=frame_id,
-    poles=poles,
+    poles=planning_poles,
     nav_points=nav_points,
     poses=poses,
-)
-    navigator.get_logger().info('等待 Nav2 active...')
-    navigator.waitUntilNav2Active(
-    navigator='bt_navigator',
-    localizer='map_server'
 )
 
     first_side = 'right' if start_from_right else 'left'
@@ -385,9 +551,76 @@ def main(args=None):
 
     last_feedback_log_time = navigator.get_clock().now()
     last_viz_pub_time = navigator.get_clock().now()
+    last_replan_time = navigator.get_clock().now()
+    last_nav_goal_update_time = navigator.get_clock().now()
+    last_plan_start = start_anchor
 
     while not navigator.isTaskComplete():
         now = navigator.get_clock().now()
+
+        if dynamic_replan and (now - last_replan_time).nanoseconds / 1e9 >= replan_period_sec:
+            try:
+                current_anchor = wait_for_current_point(
+                    node=navigator,
+                    tf_buffer=tf_buffer,
+                    frame_id=frame_id,
+                    robot_base_frame=robot_base_frame,
+                    timeout_sec=0.3,
+                )
+            except RuntimeError as ex:
+                navigator.get_logger().warn(f'动态重规划跳过: {ex}')
+                current_anchor = None
+
+            if current_anchor is not None:
+                start_shift = math.hypot(
+                    current_anchor.x - last_plan_start.x,
+                    current_anchor.y - last_plan_start.y,
+                )
+                if start_shift >= replan_min_start_shift:
+                    try:
+                        planning_poles, end_anchor, nav_points, poses = make_slalom_plan(
+                            frame_id=frame_id,
+                            start_anchor=current_anchor,
+                            poles=poles,
+                            configured_end_anchor=configured_end_anchor,
+                            offset=offset,
+                            blend_distance=blend_distance,
+                            start_from_right=start_from_right,
+                            auto_order_poles=auto_order_poles,
+                            auto_compute_end_anchor=auto_compute_end_anchor,
+                            end_extension=end_extension,
+                            node=navigator,
+                        )
+                    except ValueError as ex:
+                        navigator.get_logger().error(str(ex))
+                        break
+
+                    publish_slalom_visualization(
+                        node=navigator,
+                        path_pub=path_pub,
+                        marker_pub=marker_pub,
+                        frame_id=frame_id,
+                        poles=planning_poles,
+                        nav_points=nav_points,
+                        poses=poses,
+                    )
+                    last_plan_start = current_anchor
+                    last_viz_pub_time = now
+                    navigator.get_logger().info(
+                        f'动态重规划: 当前起点=({current_anchor.x:.3f}, {current_anchor.y:.3f}), goals={len(poses)}'
+                    )
+
+                    nav_goal_age = (
+                        now - last_nav_goal_update_time
+                    ).nanoseconds / 1e9
+                    if update_navigation_on_replan and nav_goal_age >= nav_goal_update_period_sec:
+                        navigator.get_logger().info(
+                            f'更新 Nav2 through-poses 目标: goals={len(poses)}'
+                        )
+                        navigator.goThroughPoses(poses)
+                        last_nav_goal_update_time = now
+
+            last_replan_time = now
 
         # 持续发布 RViz 可视化，防止 RViz 后添加显示项时错过消息
         if (now - last_viz_pub_time).nanoseconds / 1e9 >= viz_publish_period_sec:
@@ -396,7 +629,7 @@ def main(args=None):
                 path_pub=path_pub,
                 marker_pub=marker_pub,
                 frame_id=frame_id,
-                poles=poles,
+                poles=planning_poles,
                 nav_points=nav_points,
                 poses=poses,
             )
